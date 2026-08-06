@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import random
-import re
 from pathlib import Path
 from typing import Any
 
@@ -14,351 +12,342 @@ from src.rag import LocalRAG
 
 st.set_page_config(page_title="Copiloto Assistente", layout="wide")
 st.title("Copiloto Assistente")
-st.caption("Cliente sintético vivo + operador humano + sugestões RAG em tempo real")
+st.caption("Simulação viva de atendimento com RAG, sugestões em tempo real e rastreabilidade completa")
 
 settings = Settings()
 
 
-@st.cache_resource(show_spinner="Carregando modelo de embeddings e indexando documentos...")
-def get_rag(
-    embedding_model: str,
-    chunk_size: int,
-    chunk_overlap: int,
-) -> LocalRAG:
+@st.cache_resource(show_spinner="Carregando embeddings e indexando documentos...")
+def get_rag(model: str, chunk_size: int, overlap: int) -> LocalRAG:
     return LocalRAG(
-        embedding_model=embedding_model,
+        embedding_model=model,
         chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
+        chunk_overlap=overlap,
     )
 
 
-rag = get_rag(
-    settings.embedding_model,
-    settings.chunk_size,
-    settings.chunk_overlap,
-)
+rag = get_rag(settings.embedding_model, settings.chunk_size, settings.chunk_overlap)
 
 
 def build_context(results: list[dict[str, Any]]) -> str:
     if not results:
         return "Nenhuma fonte recuperada."
     return "\n\n".join(
-        f"FONTE: {item['source']} | CHUNK: {item['chunk_id']} | "
-        f"SCORE: {item['score']:.3f}\n{item['text']}"
+        f"FONTE: {item['source']}\n"
+        f"CHUNK: {item['chunk_id']}\n"
+        f"SCORE: {item['score']:.3f}\n"
+        f"CONTEÚDO:\n{item['text']}"
         for item in results
     )
 
 
-def conversation_text(conversation: list[dict[str, str]]) -> str:
+def conversation_text() -> str:
     return "\n".join(
-        f"{item['role'].upper()}: {item['content']}" for item in conversation
+        f"{item['role'].upper()}: {item['content']}"
+        for item in st.session_state.conversation
     )
 
 
-def retrieval_query(conversation: list[dict[str, str]]) -> str:
-    recent = conversation[-6:]
+def retrieval_query() -> str:
+    recent = st.session_state.conversation[-6:]
     return "\n".join(item["content"] for item in recent)
 
 
-def generate_assistance(
-    conversation: list[dict[str, str]],
-) -> tuple[str, list[dict[str, Any]]]:
-    query = retrieval_query(conversation)
+def extract_suggested_answer(markdown: str) -> str:
+    marker = "### Resposta sugerida"
+    if marker not in markdown:
+        return markdown.strip()
+    content = markdown.split(marker, 1)[1]
+    for next_marker in ["### Próxima ação", "### Atenção", "### Fontes"]:
+        if next_marker in content:
+            content = content.split(next_marker, 1)[0]
+    return content.strip()
+
+
+def run_rag() -> None:
+    query = retrieval_query()
     results = rag.search(query, settings.top_k)
     context = build_context(results)
-    llm = AzureLLM(settings)
+    history = conversation_text()
 
-    system = """Você é um copiloto de atendimento que ajuda um operador humano em tempo real.
-Use somente as fontes recuperadas para afirmar políticas, valores, prazos, requisitos e procedimentos.
-Considere toda a conversa. Não responda como cliente e não finja ser o operador.
-A resposta deve ser curta, prática e fácil de copiar durante um atendimento.
-Quando faltar evidência, diga claramente o que precisa ser confirmado.
-Responda em português do Brasil com estas seções:
+    st.session_state.last_query = query
+    st.session_state.sources = results
+    st.session_state.context_sent = context
+
+    llm = AzureLLM(settings)
+    system = """Você é um copiloto para um operador humano.
+Use somente os trechos recuperados para afirmar preços, políticas, prazos, requisitos e procedimentos.
+Considere o histórico completo da conversa.
+Produza uma resposta objetiva, segura e pronta para uso.
+Quando não houver evidência suficiente, informe isso claramente.
+Responda em português do Brasil com exatamente estas seções:
 
 ### Resposta sugerida
-Texto que o operador poderia enviar agora.
-
 ### Próxima ação
-Uma ação objetiva.
-
 ### Atenção
-Riscos, dados ainda necessários ou limites da informação.
-
 ### Fontes
-Liste documento, chunk e score usados.
 """
+    user = f"HISTÓRICO COMPLETO:\n{history}\n\nCONTEXTO RAG:\n{context}"
+    suggestion = llm.complete(system, user)
 
-    user = (
-        f"CONVERSA:\n{conversation_text(conversation)}\n\n"
-        f"TRECHOS RECUPERADOS:\n{context}"
-    )
-    return llm.complete(system, user), results
-
-
-def extract_json(raw: str) -> dict[str, Any]:
-    cleaned = raw.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not match:
-        raise ValueError("O modelo não devolveu um cenário JSON válido.")
-    return json.loads(match.group(0))
-
-
-def generate_scenario(difficulty: str, topic_hint: str) -> dict[str, Any]:
-    if not rag.chunks:
-        raise ValueError("Adicione documentos .md ou .txt antes de iniciar.")
-
-    sample_chunks = random.sample(rag.chunks, min(len(rag.chunks), 12))
-    corpus = "\n\n".join(
-        f"FONTE: {chunk.source}\n{chunk.text}" for chunk in sample_chunks
-    )
-    llm = AzureLLM(settings)
-
-    system = """Crie um cenário realista de atendimento baseado exclusivamente nos documentos fornecidos.
-O usuário será o operador. Você será o cliente durante a simulação.
-Escolha um problema que possa ser solucionado ou orientado com os documentos.
-Não copie respostas completas do documento para a fala inicial.
-Retorne somente JSON válido, sem markdown, neste formato:
-{
-  "title": "título curto",
-  "persona": "descrição do cliente",
-  "objective": "objetivo oculto do cliente",
-  "facts": ["fatos que o cliente sabe"],
-  "hidden_information": ["informações que só revela quando perguntado"],
-  "behavior": "como reage ao atendimento",
-  "success_criteria": ["critérios objetivos"],
-  "initial_message": "primeira fala natural do cliente"
-}
-"""
-
-    user = (
-        f"DIFICULDADE: {difficulty}\n"
-        f"PREFERÊNCIA DE ASSUNTO: {topic_hint or 'qualquer assunto dos documentos'}\n\n"
-        f"DOCUMENTOS:\n{corpus}"
-    )
-    return extract_json(llm.complete(system, user))
-
-
-def generate_customer_reply() -> str:
-    llm = AzureLLM(settings)
-    scenario = st.session_state.scenario
-    conversation = st.session_state.conversation
-
-    system = """Você é o cliente sintético de um treinamento de atendimento.
-Responda somente como cliente, em português do Brasil.
-Reaja diretamente à última mensagem do operador e mantenha coerência com o cenário.
-Não revele objetivo oculto, roteiro, critérios de sucesso, fontes ou que é uma IA.
-Revele informações escondidas apenas quando o operador perguntar de forma adequada.
-Não invente novas políticas da empresa.
-Se o problema estiver resolvido, confirme a resolução e encerre naturalmente.
-Produza apenas uma fala curta e natural do cliente.
-"""
-
-    user = (
-        f"CENÁRIO INTERNO:\n{json.dumps(scenario, ensure_ascii=False)}\n\n"
-        f"CONVERSA:\n{conversation_text(conversation)}"
-    )
-    return llm.complete(system, user).strip()
-
-
-def start_training(difficulty: str, topic_hint: str) -> None:
-    scenario = generate_scenario(difficulty, topic_hint)
-    first_message = str(scenario["initial_message"]).strip()
-    conversation = [{"role": "cliente", "content": first_message}]
-    suggestion, sources = generate_assistance(conversation)
-
-    st.session_state.training_active = True
-    st.session_state.training_finished = False
-    st.session_state.scenario = scenario
-    st.session_state.conversation = conversation
     st.session_state.suggestion = suggestion
-    st.session_state.sources = sources
+    st.session_state.suggested_answer = extract_suggested_answer(suggestion)
+    st.session_state.events.append(
+        {
+            "event": "rag_execution",
+            "query": query,
+            "retrieved_chunks": len(results),
+            "sources": [item["source"] for item in results],
+            "scores": [round(item["score"], 4) for item in results],
+        }
+    )
 
 
-def send_operator_message(message: str) -> None:
-    clean_message = message.strip()
-    if not clean_message:
-        st.warning("Digite sua resposta como operador.")
+def add_customer_message(message: str) -> None:
+    clean = message.strip()
+    if not clean:
+        st.warning("Digite a mensagem do cliente.")
         return
+    st.session_state.conversation.append({"role": "cliente", "content": clean})
+    st.session_state.events.append({"event": "customer_message", "content": clean})
+    run_rag()
 
-    st.session_state.conversation.append(
-        {"role": "operador", "content": clean_message}
+
+def add_operator_message(message: str, origin: str) -> None:
+    clean = message.strip()
+    if not clean:
+        st.warning("Digite ou selecione uma resposta do atendente.")
+        return
+    st.session_state.conversation.append({"role": "atendente", "content": clean})
+    st.session_state.events.append(
+        {"event": "operator_message", "origin": origin, "content": clean}
     )
-    customer_reply = generate_customer_reply()
-    st.session_state.conversation.append(
-        {"role": "cliente", "content": customer_reply}
-    )
-    suggestion, sources = generate_assistance(st.session_state.conversation)
-    st.session_state.suggestion = suggestion
-    st.session_state.sources = sources
 
 
-def finish_training() -> None:
+def generate_full_answer() -> None:
+    results = rag.search(conversation_text(), settings.top_k)
+    context = build_context(results)
     llm = AzureLLM(settings)
-    results = rag.search(
-        retrieval_query(st.session_state.conversation),
-        settings.top_k,
-    )
-    system = """Você é um avaliador de treinamento de atendimento.
-Avalie apenas o desempenho do operador humano. Considere o cenário, a conversa e as fontes.
-Dê notas de 0 a 10 para: investigação, clareza, aderência às fontes, resolução e segurança.
-Mostre acertos, falhas, informações que deveriam ter sido perguntadas e uma resposta melhor para o pior turno.
+    system = """Você é um assistente de atendimento.
+Receba o histórico completo da conversa e o contexto recuperado pelo RAG.
+Gere a melhor resposta final possível para o atendente enviar agora.
+Use somente as fontes fornecidas para fatos, preços, condições, prazos e procedimentos.
+Responda somente com a mensagem final ao cliente, sem explicações adicionais.
 """
-    user = (
-        f"CENÁRIO:\n{json.dumps(st.session_state.scenario, ensure_ascii=False)}\n\n"
-        f"CONVERSA:\n{conversation_text(st.session_state.conversation)}\n\n"
-        f"FONTES:\n{build_context(results)}"
+    user = f"CONVERSA COMPLETA:\n{conversation_text()}\n\nCONTEXTO RAG:\n{context}"
+    st.session_state.full_answer = llm.complete(system, user).strip()
+    st.session_state.events.append(
+        {
+            "event": "full_context_generation",
+            "retrieved_chunks": len(results),
+            "sources": [item["source"] for item in results],
+        }
     )
-    st.session_state.evaluation = llm.complete(system, user)
-    st.session_state.training_finished = True
 
 
 for key, default in {
-    "training_active": False,
-    "training_finished": False,
     "conversation": [],
-    "scenario": {},
     "suggestion": "",
+    "suggested_answer": "",
+    "full_answer": "",
     "sources": [],
-    "evaluation": "",
+    "last_query": "",
+    "context_sent": "",
+    "events": [],
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-training_tab, docs_tab, architecture_tab = st.tabs(
-    ["Treinamento vivo", "Base documental", "Como funciona"]
+sim_tab, docs_tab, detail_tab, architecture_tab = st.tabs(
+    ["Simulação viva", "Base documental", "Detalhes da execução", "Arquitetura"]
 )
 
-with training_tab:
-    if not st.session_state.training_active:
-        st.subheader("Criar atendimento a partir da base documental")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            difficulty = st.selectbox(
-                "Dificuldade",
-                ["Fácil", "Média", "Difícil"],
-                index=1,
-            )
-        with col_b:
-            topic_hint = st.text_input(
-                "Assunto opcional",
-                placeholder="Deixe vazio para o sistema escolher qualquer assunto",
-            )
-
-        st.info(
-            f"Base atual: {len(rag.chunks)} chunks em "
-            f"{len({chunk.source for chunk in rag.chunks})} documentos."
-        )
-        if st.button("Iniciar conversa", type="primary", use_container_width=True):
-            try:
-                with st.spinner("Criando cliente e primeira sugestão..."):
-                    start_training(difficulty, topic_hint)
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Falha ao iniciar treinamento: {exc}")
-    else:
-        header_left, header_right = st.columns([4, 1])
-        with header_left:
-            st.subheader(st.session_state.scenario.get("title", "Atendimento"))
-            st.caption("Você é o operador. A IA representa somente o cliente.")
-        with header_right:
-            if st.button("Novo cenário", use_container_width=True):
-                st.session_state.training_active = False
-                st.session_state.training_finished = False
-                st.rerun()
-
-        chat_col, assist_col = st.columns([1.45, 1], gap="large")
-
-        with chat_col:
-            st.markdown("### Conversa")
-            chat_box = st.container(height=510)
-            with chat_box:
-                for item in st.session_state.conversation:
-                    avatar = "👤" if item["role"] == "cliente" else "🎧"
-                    role = "user" if item["role"] == "cliente" else "assistant"
-                    with st.chat_message(role, avatar=avatar):
-                        st.markdown(item["content"])
-
-            if not st.session_state.training_finished:
-                with st.form("operator_form", clear_on_submit=True):
-                    operator_message = st.text_area(
-                        "Sua resposta como operador",
-                        height=110,
-                        placeholder="Digite o que você responderia ao cliente...",
-                    )
-                    send_col, finish_col = st.columns([3, 1])
-                    submitted = send_col.form_submit_button(
-                        "Enviar ao cliente",
-                        type="primary",
-                        use_container_width=True,
-                    )
-                    finished = finish_col.form_submit_button(
-                        "Encerrar",
-                        use_container_width=True,
-                    )
-
-                if submitted:
-                    try:
-                        with st.spinner("Cliente respondendo e RAG atualizando..."):
-                            send_operator_message(operator_message)
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Falha ao continuar conversa: {exc}")
-                if finished:
-                    try:
-                        with st.spinner("Avaliando seu atendimento..."):
-                            finish_training()
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Falha ao avaliar: {exc}")
-
-        with assist_col:
-            st.markdown("### Copiloto em tempo real")
-            st.markdown(st.session_state.suggestion or "Aguardando conversa.")
-
-            with st.expander("Trechos recuperados pelo RAG", expanded=True):
-                if not st.session_state.sources:
-                    st.warning("Nenhum trecho relevante recuperado.")
-                for item in st.session_state.sources:
-                    st.markdown(
-                        f"**{item['source']}** · `{item['chunk_id']}` · "
-                        f"score `{item['score']:.3f}`"
-                    )
-                    st.caption(item["text"])
-                    st.divider()
-
-        if st.session_state.training_finished:
-            st.divider()
-            st.subheader("Avaliação do operador")
-            st.markdown(st.session_state.evaluation)
-
-with docs_tab:
-    st.subheader("Documentos usados pelo RAG")
+with sim_tab:
+    st.subheader("Simulação de atendimento em tempo real")
     st.write(
-        "Envie arquivos `.md` ou `.txt`. Após salvar, reindexe a base para criar "
-        "novos chunks e embeddings."
+        "Você controla os dois lados da conversa. Ao enviar uma mensagem como cliente, "
+        "o RAG é executado imediatamente e a sugestão aparece no painel central."
     )
 
-    uploaded_files = st.file_uploader(
+    top_a, top_b, top_c, top_d = st.columns(4)
+    top_a.metric("Documentos", len({chunk.source for chunk in rag.chunks}))
+    top_b.metric("Chunks", len(rag.chunks))
+    top_c.metric("Top-k", settings.top_k)
+    top_d.metric("Turnos", len(st.session_state.conversation))
+
+    client_col, rag_col, operator_col = st.columns([1, 1.2, 1], gap="large")
+
+    with client_col:
+        st.markdown("## Cliente")
+        st.caption("Digite como se fosse o cliente real.")
+        with st.form("customer_form", clear_on_submit=True):
+            customer_input = st.text_area(
+                "Mensagem do cliente",
+                height=130,
+                placeholder="Ex.: Qual o preço dessa mesa?",
+            )
+            customer_submit = st.form_submit_button(
+                "Enviar como cliente",
+                type="primary",
+                use_container_width=True,
+            )
+        if customer_submit:
+            try:
+                with st.spinner("Executando busca vetorial e gerando sugestão..."):
+                    add_customer_message(customer_input)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Falha ao processar mensagem: {exc}")
+
+        st.markdown("### Histórico do cliente")
+        for item in st.session_state.conversation:
+            if item["role"] == "cliente":
+                with st.chat_message("user", avatar="👤"):
+                    st.markdown(item["content"])
+
+    with rag_col:
+        st.markdown("## RAG e sugestão")
+        st.caption("Atualizado após cada nova mensagem do cliente.")
+
+        if st.session_state.suggestion:
+            st.markdown(st.session_state.suggestion)
+        else:
+            st.info("Envie uma mensagem como cliente para executar o RAG.")
+
+        if st.button(
+            "Enviar todo o contexto ao GPT",
+            use_container_width=True,
+            disabled=not st.session_state.conversation,
+        ):
+            try:
+                with st.spinner("Gerando resposta com histórico completo..."):
+                    generate_full_answer()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Falha ao gerar resposta completa: {exc}")
+
+        if st.session_state.full_answer:
+            st.markdown("### Resposta com contexto completo")
+            st.success(st.session_state.full_answer)
+
+        with st.expander("Chunks recuperados", expanded=True):
+            if not st.session_state.sources:
+                st.write("Nenhum chunk recuperado ainda.")
+            for item in st.session_state.sources:
+                st.markdown(
+                    f"**{item['source']}**  \n"
+                    f"Chunk: `{item['chunk_id']}`  \n"
+                    f"Score: `{item['score']:.3f}`"
+                )
+                st.caption(item["text"])
+                st.divider()
+
+    with operator_col:
+        st.markdown("## Atendente")
+        st.caption("Escreva manualmente ou reutilize a resposta sugerida.")
+
+        default_operator = st.session_state.get("operator_draft", "")
+        with st.form("operator_form", clear_on_submit=True):
+            operator_input = st.text_area(
+                "Resposta do atendente",
+                value=default_operator,
+                height=130,
+                placeholder="Digite a resposta que será enviada ao cliente...",
+            )
+            manual_submit = st.form_submit_button(
+                "Enviar como atendente",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if manual_submit:
+            add_operator_message(operator_input, "manual")
+            st.session_state.operator_draft = ""
+            st.rerun()
+
+        if st.button(
+            "Usar resposta da IA",
+            use_container_width=True,
+            disabled=not st.session_state.suggested_answer,
+        ):
+            add_operator_message(st.session_state.suggested_answer, "ai_suggestion")
+            st.rerun()
+
+        if st.button(
+            "Usar resposta completa",
+            use_container_width=True,
+            disabled=not st.session_state.full_answer,
+        ):
+            add_operator_message(st.session_state.full_answer, "full_context")
+            st.rerun()
+
+        st.markdown("### Histórico do atendente")
+        for item in st.session_state.conversation:
+            if item["role"] == "atendente":
+                with st.chat_message("assistant", avatar="🎧"):
+                    st.markdown(item["content"])
+
+    st.divider()
+    st.markdown("## Linha do tempo completa")
+    for item in st.session_state.conversation:
+        role = "user" if item["role"] == "cliente" else "assistant"
+        avatar = "👤" if item["role"] == "cliente" else "🎧"
+        with st.chat_message(role, avatar=avatar):
+            st.markdown(f"**{item['role'].title()}:** {item['content']}")
+
+    reset_col, export_col = st.columns(2)
+    if reset_col.button("Limpar simulação", use_container_width=True):
+        for key in [
+            "conversation",
+            "suggestion",
+            "suggested_answer",
+            "full_answer",
+            "sources",
+            "last_query",
+            "context_sent",
+            "events",
+        ]:
+            st.session_state[key] = [] if key in {"conversation", "sources", "events"} else ""
+        st.rerun()
+
+    export_payload = json.dumps(
+        {
+            "conversation": st.session_state.conversation,
+            "events": st.session_state.events,
+            "last_query": st.session_state.last_query,
+            "last_sources": st.session_state.sources,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    export_col.download_button(
+        "Exportar evidências em JSON",
+        data=export_payload,
+        file_name="simulacao_copiloto_assistente.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+with docs_tab:
+    st.subheader("Base documental e indexação")
+    st.write(
+        "Envie documentos `.md` ou `.txt`. O sistema divide os arquivos em chunks, "
+        "gera embeddings locais e reconstrói o índice vetorial."
+    )
+    uploads = st.file_uploader(
         "Adicionar documentos",
         type=["md", "txt"],
         accept_multiple_files=True,
     )
-    if st.button("Salvar e reindexar", disabled=not uploaded_files):
+    if st.button("Salvar e reindexar", disabled=not uploads):
         docs_dir = Path("data/docs")
         docs_dir.mkdir(parents=True, exist_ok=True)
-        for uploaded_file in uploaded_files or []:
-            safe_name = Path(uploaded_file.name).name
-            (docs_dir / safe_name).write_bytes(uploaded_file.getvalue())
+        for uploaded in uploads or []:
+            safe_name = Path(uploaded.name).name
+            (docs_dir / safe_name).write_bytes(uploaded.getvalue())
         get_rag.clear()
-        st.success("Documentos salvos. A página será recarregada com o novo índice.")
+        st.success("Arquivos salvos e índice invalidado. Recarregando...")
         st.rerun()
-
-    metric_a, metric_b, metric_c = st.columns(3)
-    metric_a.metric("Documentos", len({chunk.source for chunk in rag.chunks}))
-    metric_b.metric("Chunks", len(rag.chunks))
-    metric_c.metric("Top-k", settings.top_k)
 
     for source in sorted({chunk.source for chunk in rag.chunks}):
         source_chunks = [chunk for chunk in rag.chunks if chunk.source == source]
@@ -368,29 +357,55 @@ with docs_tab:
                 st.write(chunk.text)
                 st.divider()
 
+with detail_tab:
+    st.subheader("O que ocorreu por trás da simulação")
+    st.markdown("### 1. Consulta enviada ao retriever")
+    st.code(st.session_state.last_query or "Nenhuma consulta executada.")
+
+    st.markdown("### 2. Contexto montado para o GPT")
+    st.code(st.session_state.context_sent or "Nenhum contexto montado.")
+
+    st.markdown("### 3. Eventos registrados")
+    if st.session_state.events:
+        st.json(st.session_state.events)
+    else:
+        st.info("Nenhum evento registrado.")
+
+    st.markdown("### 4. Fluxo explicado")
+    st.write(
+        "1. A mensagem do cliente é adicionada ao histórico.\n"
+        "2. Os últimos turnos formam a consulta semântica.\n"
+        "3. A consulta vira embedding.\n"
+        "4. O índice vetorial compara a consulta com todos os chunks.\n"
+        "5. Os chunks com maior similaridade são selecionados.\n"
+        "6. O contexto recuperado e o histórico são enviados ao GPT-4o mini.\n"
+        "7. O copiloto gera uma sugestão rastreável.\n"
+        "8. O operador pode escrever, usar a IA ou pedir uma resposta com todo o contexto."
+    )
+
 with architecture_tab:
     st.markdown(
         """
 ```mermaid
 sequenceDiagram
-    participant D as Documentos
+    participant C as Cliente
+    participant H as Histórico
     participant E as Embeddings
-    participant C as Cliente sintético
-    participant U as Operador humano
-    participant R as RAG
-    participant A as Copiloto
+    participant R as Retriever vetorial
+    participant G as GPT-4o mini
+    participant O as Operador
 
-    D->>E: Chunking + embeddings
-    E->>R: Índice vetorial
-    C->>U: Mensagem do cliente
-    C->>R: Consulta com histórico
-    R->>A: Top-k chunks e fontes
-    A->>U: Sugestão ao lado da conversa
-    U->>C: Resposta digitada pelo operador
-    C->>C: Reage ao que o operador disse
-    C->>R: Nova mensagem + histórico
-    R->>A: Nova recuperação
-    A->>U: Sugestão atualizada
+    C->>H: Digita uma mensagem
+    H->>E: Monta consulta com últimos turnos
+    E->>R: Gera embedding da consulta
+    R->>R: Compara com embeddings dos chunks
+    R->>G: Envia top-k chunks + scores + fontes
+    H->>G: Envia histórico da conversa
+    G->>O: Gera sugestão em tempo real
+    O->>C: Digita resposta manual
+    O->>C: ou usa resposta da IA
+    O->>G: Opcional: envia todo o contexto
+    G->>O: Gera resposta consolidada
 ```
 """
     )
