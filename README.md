@@ -1,213 +1,180 @@
 # Copiloto Assistente
 
-MVP de um copiloto para operadores de atendimento. O sistema acompanha uma conversa, consulta uma base documental local, sugere respostas fundamentadas e permite simular atendimentos com agentes sintéticos.
+MVP de um copiloto interativo para atendimento. O usuário pode atuar como cliente e como atendente, enquanto o sistema recupera informações da base documental e gera sugestões fundamentadas em tempo real.
 
-## Objetivo do primeiro teste
+## O que esta versão permite
 
-Nesta primeira versão, o projeto permite:
+- adicionar documentos `.md` e `.txt` à base;
+- dividir os documentos em chunks com overlap;
+- gerar embeddings multilíngues locais;
+- recuperar os chunks mais relevantes por similaridade vetorial;
+- manter o histórico completo da conversa;
+- mostrar sugestões de atendimento com fontes e scores;
+- responder manualmente ou usar a resposta sugerida pela IA;
+- enviar toda a conversa e todo o contexto recuperado ao GPT-4o mini;
+- exportar as evidências da simulação para apresentação e auditoria.
 
-- carregar documentos `.txt` e `.md` da pasta `data/docs`;
-- criar uma busca RAG local com TF-IDF;
-- conversar manualmente com um cliente simulado;
-- gerar uma sugestão para o operador com Azure OpenAI;
-- executar uma conversa sintética entre cliente e operador;
-- avaliar a conversa com um juiz LLM;
-- exibir fontes, trechos recuperados e pontuações.
-
-Esta versão não depende de Elastic nem de embeddings externos. Isso reduz a complexidade do primeiro teste. Depois da validação, o retriever local pode ser substituído por Elastic híbrido, Azure AI Search ou outro banco vetorial.
-
-## Arquitetura
+## Fluxo do atendimento interativo
 
 ```mermaid
-flowchart TD
-    subgraph INGESTAO["Ingestão de documentos"]
-        A[PDF, PPT, DOCX, imagens] --> B[Classificador de documento]
-        B --> C[Document Intelligence]
-        B --> D[Vision Turbo]
-        C --> E[Fusão das extrações]
-        D --> E
-        E --> F[GPT organiza em Markdown estruturado]
-        F --> G[Validação e controle de qualidade]
-        G --> H[Chunking hierárquico]
-        H --> I[Embeddings]
-        I --> J[Elastic ou Vector Database]
-    end
+sequenceDiagram
+    participant C as Cliente
+    participant H as Histórico
+    participant E as Embeddings
+    participant R as Retriever vetorial
+    participant G as GPT-4o mini
+    participant O as Operador
 
-    subgraph ATENDIMENTO["Atendimento"]
-        K[Mensagem do cliente] --> L[Gerenciador da conversa]
-        L --> M[Detecção de intenção e entidades]
-        M --> N[Reformulação da consulta]
-        N --> O[Busca híbrida]
-        J --> O
-        O --> P[Rerank]
-        P --> Q[Context Assembly]
-        Q --> R[GPT gera assistência]
-        R --> S[Painel do operador]
-    end
-
-    subgraph SIMULACAO["Simulação"]
-        T[Agente cliente sintético] --> K
-        S --> U[Agente operador sintético]
-        U --> T
-        T --> V[Avaliador]
-        U --> V
-        R --> V
-        V --> W[Métricas e findings]
-    end
+    C->>H: Digita uma mensagem
+    H->>E: Monta consulta com últimos turnos
+    E->>R: Gera embedding da consulta
+    R->>R: Compara com embeddings dos chunks
+    R->>G: Envia top-k chunks + scores + fontes
+    H->>G: Envia histórico da conversa
+    G->>O: Gera sugestão em tempo real
+    O->>C: Digita resposta manual
+    O->>C: Ou usa resposta da IA
+    O->>G: Opcionalmente envia todo o contexto
+    G->>O: Gera resposta consolidada
 ```
 
-No MVP atual, a parte de ingestão foi simplificada:
+## Arquitetura do MVP
 
-```text
-TXT ou Markdown
-    ↓
-Chunking local
-    ↓
-TF-IDF
-    ↓
-Top-k trechos
-    ↓
-GPT gera a sugestão
+```mermaid
+flowchart LR
+    A[Documentos MD e TXT] --> B[Chunking com overlap]
+    B --> C[Embeddings multilíngues]
+    C --> D[Índice vetorial local]
+
+    E[Mensagem do cliente] --> F[Histórico da conversa]
+    F --> G[Consulta de recuperação]
+    G --> H[Embedding da consulta]
+    H --> D
+    D --> I[Top-k chunks]
+    I --> J[Contexto com fontes e scores]
+    F --> K[GPT-4o mini]
+    J --> K
+    K --> L[Sugestão ao atendente]
+    L --> M[Resposta manual ou resposta da IA]
+    M --> F
 ```
 
-## Estrutura
+## Interface da demonstração
 
-```text
-copiloto_assistente/
-├── app.py
-├── requirements.txt
-├── .env.example
-├── data/
-│   ├── docs/
-│   │   └── politica_cancelamento.md
-│   └── scenarios/
-│       └── cancelamento.json
-└── src/
-    ├── __init__.py
-    ├── azure_client.py
-    ├── config.py
-    ├── evaluator.py
-    ├── rag.py
-    └── simulation.py
-```
+A tela principal é organizada em três áreas:
+
+1. **Cliente:** mensagem enviada pelo cliente e histórico da conversa.
+2. **RAG e copiloto:** consulta gerada, chunks recuperados, scores, fontes e sugestão atualizada.
+3. **Atendente:** resposta digitada manualmente ou preenchida a partir da sugestão da IA.
+
+O botão **Enviar todo o contexto ao GPT** usa a conversa completa e os trechos recuperados para produzir uma resposta consolidada.
 
 ## Configuração do `.env`
 
-Crie um arquivo chamado `.env` na raiz e preencha:
+Crie um arquivo `.env` na raiz:
 
 ```env
-AZURE_OPENAI_ENDPOINT_5=
-AZURE_OPENAI_API_KEY_PRIMARY_5=
-AZURE_OPENAI_API_VERSION_5=2025-04-01-preview
-AZURE_OPENAI_MODEL_5=gpt-5.4-mini-ptu
+AZURE_STRUCTURING_ENDPOINT=
+AZURE_STRUCTURING_KEY=
+AZURE_STRUCTURING_DEPLOYMENT=gpt-4o-mini-2
+AZURE_STRUCTURING_VERSION_COMPLETIONS=2024-02-15-preview
 
-TOP_K=4
-MAX_TURNS=8
+REQUEST_TIMEOUT_SECONDS=120
+
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+CHUNK_SIZE=900
+CHUNK_OVERLAP=180
+TOP_K=5
+MAX_TURNS=12
 ```
 
-O valor de `AZURE_OPENAI_MODEL_5` deve ser o nome exato do deployment criado no Azure OpenAI. Em Azure, o deployment pode ter um nome diferente do nome comercial do modelo.
+O endpoint deve ser apenas o endereço-base do recurso Azure OpenAI, por exemplo:
 
-Nunca envie o arquivo `.env` ao GitHub. O `.gitignore` deste projeto já bloqueia esse arquivo.
+```text
+https://nome-do-recurso.openai.azure.com/
+```
 
-## Instalação no Windows
+Nunca envie o arquivo `.env` ao GitHub.
+
+## Instalação com `uv` no Windows
 
 ```powershell
 git clone https://github.com/eduardo-data/copiloto_assistente.git
 cd copiloto_assistente
 
-python -m venv .venv
+uv venv .venv --python 3.11
 .\.venv\Scripts\Activate.ps1
-
-python -m pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 
 Copy-Item .env.example .env
 ```
 
-Depois, edite o `.env` e execute:
+Depois de preencher o `.env`, execute:
 
 ```powershell
-streamlit run app.py
+uv run streamlit run app.py
 ```
 
-## Como testar
+## Atualização de uma cópia existente
 
-### Teste manual
-
-1. Abra a aba **Atendimento manual**.
-2. Digite uma mensagem como: `Quero cancelar meu plano porque está caro.`
-3. Clique em **Gerar assistência**.
-4. Verifique intenção, resposta sugerida, próxima ação, alertas e fontes.
-
-### Teste sintético
-
-1. Abra a aba **Simulação sintética**.
-2. Clique em **Executar cenário**.
-3. O cliente sintético e o operador sintético conversarão por até oito turnos.
-4. Ao final, um juiz avaliará fundamentação, aderência ao procedimento, resolução e riscos.
-
-### Fluxo da conversa sintética
-
-```mermaid
-sequenceDiagram
-    participant C as Cliente sintético
-    participant R as RAG
-    participant O as Operador sintético
-    participant J as Avaliador
-
-    C->>R: Envia a primeira mensagem
-    R->>R: Busca documentos relevantes
-    R->>O: Entrega contexto e sugestão
-    O->>C: Responde usando a assistência
-    C->>C: Analisa a conversa e o cenário
-    C->>R: Gera nova resposta como cliente
-    R->>O: Faz nova busca no RAG
-    O->>C: Responde novamente
-    C->>R: Continua a conversa
-    R->>O: Gera nova assistência
-    O->>C: Resposta final
-    C->>J: Conversa completa
-    O->>J: Respostas e fontes
-    J->>J: Avalia qualidade, riscos e alucinações
+```powershell
+git checkout main
+git pull origin main
+uv pip install -r requirements.txt
+uv run streamlit run app.py
 ```
 
-## Componentes futuros
+## Base documental
 
-### Etapa 2 — Ingestão multimodal
+Os documentos podem ser adicionados pela interface ou colocados em:
 
-- Azure Document Intelligence para OCR e layout;
-- Vision Turbo para diagramas, cards, preços e relações visuais;
-- fusão de extrações;
-- Markdown estruturado;
-- metadados de página, versão, vigência e responsável.
+```text
+data/docs/
+```
 
-### Etapa 3 — RAG corporativo
+Ao reindexar, o sistema executa:
 
-- Elastic BM25 + vetorial;
-- embeddings multilíngues;
-- filtros por produto, canal, público e vigência;
-- reranking;
-- citações obrigatórias;
-- bloqueio de respostas sem evidência.
+```text
+Documento
+  → limpeza básica
+  → chunking
+  → overlap
+  → embeddings
+  → índice vetorial
+  → recuperação top-k
+```
 
-### Etapa 4 — Integração com atendimento real
+## Evidências para apresentação
 
-- FastAPI;
-- WebSocket;
-- integração por API ou webhook com o chat do operador;
-- painel lateral de assistência;
-- feedback útil, incorreto ou documento desatualizado;
-- observabilidade com Langfuse e Elastic.
+A simulação registra:
+
+- mensagens do cliente e do atendente;
+- origem da resposta do atendente: manual ou IA;
+- consulta usada no retriever;
+- chunks recuperados;
+- scores de similaridade;
+- fontes utilizadas;
+- contexto enviado ao modelo;
+- resposta sugerida e resposta consolidada.
+
+Esses dados podem ser exportados em JSON para demonstração, análise e auditoria.
 
 ## Limitações do MVP
 
-- trabalha inicialmente apenas com `.txt` e `.md`;
-- usa busca TF-IDF, não embeddings;
+- aceita inicialmente documentos `.md` e `.txt`;
+- mantém o índice vetorial em memória;
 - não possui autenticação;
-- não deve ser usado em produção;
-- a avaliação por LLM é indicativa e deve ser combinada com métricas determinísticas;
-- respostas não são enviadas automaticamente ao cliente.
+- não deve ser usado diretamente em produção;
+- a qualidade depende da extração e da organização dos documentos;
+- o GPT deve informar quando as fontes recuperadas não forem suficientes.
 
-## Segurança
+## Evoluções planejadas
 
-A chave do Azure deve existir apenas no `.env` local. Caso uma chave seja exposta em commit, mensagem, print ou log, revogue-a no Azure e gere outra imediatamente.
+- ingestão de PDF, DOCX, PPT e imagens;
+- OCR e compreensão de layout;
+- Elastic ou Azure AI Search;
+- busca híbrida BM25 + vetorial;
+- reranking;
+- filtros por produto, canal, vigência e público;
+- observabilidade com Langfuse e Elastic;
+- integração com a plataforma real de atendimento.
