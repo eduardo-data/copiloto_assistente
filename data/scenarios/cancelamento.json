@@ -1,0 +1,19 @@
+{
+  "scenario_id": "cancelamento_001",
+  "persona": "cliente impaciente",
+  "product": "Plano Premium",
+  "reason": "valor alto",
+  "hidden_goal": "cancelar o produto",
+  "initial_message": "Quero cancelar meu plano porque está muito caro.",
+  "required_actions": [
+    "confirmar identidade",
+    "identificar produto",
+    "explicar condições documentadas",
+    "registrar solicitação"
+  ],
+  "forbidden_actions": [
+    "inventar multa",
+    "prometer cancelamento concluído sem validação",
+    "oferecer condição inexistente"
+  ]
+}
