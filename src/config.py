@@ -20,8 +20,13 @@ class Settings:
     ).strip()
     request_timeout_seconds: int = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "120"))
 
-    top_k: int = int(os.getenv("TOP_K", "4"))
-    max_turns: int = int(os.getenv("MAX_TURNS", "8"))
+    embedding_model: str = os.getenv(
+        "EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    ).strip()
+    chunk_size: int = int(os.getenv("CHUNK_SIZE", "900"))
+    chunk_overlap: int = int(os.getenv("CHUNK_OVERLAP", "180"))
+    top_k: int = int(os.getenv("TOP_K", "5"))
+    max_turns: int = int(os.getenv("MAX_TURNS", "12"))
 
     def validate(self) -> None:
         missing: list[str] = []
@@ -34,6 +39,13 @@ class Settings:
             missing.append("AZURE_STRUCTURING_DEPLOYMENT")
         if not self.azure_api_version:
             missing.append("AZURE_STRUCTURING_VERSION_COMPLETIONS")
+        if not self.embedding_model:
+            missing.append("EMBEDDING_MODEL")
+
+        if self.chunk_size <= 0:
+            raise ValueError("CHUNK_SIZE deve ser maior que zero.")
+        if self.chunk_overlap < 0 or self.chunk_overlap >= self.chunk_size:
+            raise ValueError("CHUNK_OVERLAP deve ser menor que CHUNK_SIZE.")
 
         if missing:
             raise ValueError("Variáveis ausentes no .env: " + ", ".join(missing))
