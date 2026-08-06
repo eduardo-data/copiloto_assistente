@@ -376,7 +376,7 @@ with detail_tab:
         "1. A mensagem do cliente é adicionada ao histórico.\n"
         "2. Os últimos turnos formam a consulta semântica.\n"
         "3. A consulta vira embedding.\n"
-        "4. O índice vetorial compara a consulta com todos os chunks.\n"
+        "4. A matriz NumPy compara a consulta com todos os chunks.\n"
         "5. Os chunks com maior similaridade são selecionados.\n"
         "6. O contexto recuperado e o histórico são enviados ao GPT-4o mini.\n"
         "7. O copiloto gera uma sugestão rastreável.\n"
@@ -384,6 +384,106 @@ with detail_tab:
     )
 
 with architecture_tab:
+    st.subheader("Arquitetura técnica do RAG")
+    st.write(
+        "Esta aba mostra exatamente o que está implementado no MVP atual. "
+        "Os embeddings não estão em um banco persistente: eles ficam em uma matriz NumPy na memória do processo Streamlit."
+    )
+
+    metric_1, metric_2, metric_3, metric_4 = st.columns(4)
+    metric_1.metric("Chunk size", f"{settings.chunk_size} caracteres")
+    metric_2.metric("Overlap", f"{settings.chunk_overlap} caracteres")
+    metric_3.metric("Top-k", settings.top_k)
+    metric_4.metric("Chunks indexados", len(rag.chunks))
+
+    st.markdown("## Resumo dos componentes")
+    st.markdown(
+        f"""
+| Componente | Implementação atual |
+|---|---|
+| Documentos | `.md` e `.txt` em `data/docs/` |
+| Chunking | Por caracteres, com cortes preferenciais em parágrafos, linhas e frases |
+| Tamanho | `{settings.chunk_size}` caracteres por chunk |
+| Overlap | `{settings.chunk_overlap}` caracteres |
+| Embedding | `{settings.embedding_model}` |
+| Execução | Local, com `sentence-transformers` |
+| Normalização | Vetores normalizados antes da busca |
+| Banco vetorial | **Nenhum banco persistente neste MVP** |
+| Armazenamento | Matriz NumPy `float32` em memória |
+| Similaridade | Produto escalar entre vetores normalizados, equivalente ao cosseno |
+| Recuperação | Top-k global de `{settings.top_k}` chunks |
+| Threshold | Não implementado |
+| Reranking | Não implementado |
+| Consulta | Últimos 6 turnos da conversa |
+| LLM | Azure OpenAI, deployment `{settings.azure_deployment}` |
+"""
+    )
+
+    st.info(
+        "Índice vetorial local, neste projeto, significa uma matriz de vetores em memória. "
+        "Não significa Elastic, Azure AI Search, Qdrant, Milvus, Weaviate ou pgvector."
+    )
+
+    st.markdown("## 1. Fluxo de ingestão e indexação")
+    st.markdown(
+        """
+```mermaid
+flowchart LR
+    A[Documento MD ou TXT] --> B[Leitura UTF-8]
+    B --> C[Normalização das linhas]
+    C --> D[Janela de até CHUNK_SIZE caracteres]
+    D --> E{Existe separador natural?}
+    E -->|Sim| F[Corta em parágrafo, linha, frase ou ponto e vírgula]
+    E -->|Não| G[Corta no limite da janela]
+    F --> H[Aplica overlap]
+    G --> H
+    H --> I[Gera chunk_id, fonte, start e end]
+    I --> J[SentenceTransformer.encode]
+    J --> K[Normaliza embeddings]
+    K --> L[Matriz NumPy float32 em memória]
+```
+"""
+    )
+
+    st.markdown("### Tipo de chunk")
+    st.write(
+        "O chunking é baseado em caracteres. Ele procura um corte natural na segunda metade da janela, "
+        "priorizando parágrafo, quebra de linha, final de frase e ponto e vírgula. "
+        "Não é chunking semântico, por tokens ou hierárquico nesta versão."
+    )
+
+    st.markdown("### Por que existe overlap")
+    st.write(
+        "O overlap repete parte do final do chunk anterior no início do próximo. "
+        "Isso diminui o risco de uma informação importante ficar dividida exatamente entre dois chunks."
+    )
+
+    st.markdown("## 2. Fluxo de recuperação")
+    st.markdown(
+        """
+```mermaid
+flowchart LR
+    A[Nova mensagem do cliente] --> B[Histórico da conversa]
+    B --> C[Seleciona os últimos 6 turnos]
+    C --> D[Monta consulta semântica]
+    D --> E[Gera embedding normalizado]
+    E --> F[Compara com todos os chunks]
+    F --> G[Produto escalar]
+    G --> H[Ordena scores do maior para o menor]
+    H --> I[Seleciona top-k]
+    I --> J[Retorna fonte, chunk_id, score e conteúdo]
+```
+"""
+    )
+
+    st.markdown("### Cálculo de similaridade")
+    st.code("scores = embeddings_dos_chunks @ embedding_da_consulta", language="python")
+    st.write(
+        "Os embeddings dos documentos e da consulta são normalizados. Por isso, o produto escalar "
+        "representa a similaridade de cosseno. Quanto maior o score, maior a proximidade semântica."
+    )
+
+    st.markdown("## 3. Montagem do contexto e geração")
     st.markdown(
         """
 ```mermaid
@@ -391,21 +491,77 @@ sequenceDiagram
     participant C as Cliente
     participant H as Histórico
     participant E as Embeddings
-    participant R as Retriever vetorial
+    participant M as Matriz NumPy
     participant G as GPT-4o mini
     participant O as Operador
 
-    C->>H: Digita uma mensagem
-    H->>E: Monta consulta com últimos turnos
-    E->>R: Gera embedding da consulta
-    R->>R: Compara com embeddings dos chunks
-    R->>G: Envia top-k chunks + scores + fontes
-    H->>G: Envia histórico da conversa
-    G->>O: Gera sugestão em tempo real
-    O->>C: Digita resposta manual
-    O->>C: ou usa resposta da IA
-    O->>G: Opcional: envia todo o contexto
+    C->>H: Envia mensagem
+    H->>E: Entrega os últimos 6 turnos
+    E->>M: Gera e compara embedding da consulta
+    M->>M: Ordena scores e seleciona top-k
+    M->>G: Envia chunks, fontes, IDs e scores
+    H->>G: Envia histórico completo
+    G->>O: Gera resposta sugerida, ação, alertas e fontes
+    O->>C: Responde manualmente
+    O->>C: Ou usa a resposta da IA
+    O->>G: Opcionalmente envia todo o histórico
     G->>O: Gera resposta consolidada
+```
+"""
+    )
+
+    st.markdown("### Estrutura do contexto")
+    st.code(
+        """FONTE: catalogo.md
+CHUNK: catalogo.md::3
+SCORE: 0.842
+CONTEÚDO:
+Texto recuperado do documento..."""
+    )
+
+    st.markdown("## 4. O que está em memória")
+    memory_col_1, memory_col_2 = st.columns(2)
+    with memory_col_1:
+        st.markdown("### Chunks")
+        st.write(
+            "Lista Python contendo `chunk_id`, fonte, texto e posições inicial e final de cada trecho."
+        )
+    with memory_col_2:
+        st.markdown("### Embeddings")
+        st.write(
+            "Matriz NumPy `float32`, com uma linha para cada chunk e uma coluna para cada dimensão do embedding."
+        )
+
+    st.warning(
+        "Ao reiniciar o aplicativo, os embeddings são recalculados. Não existe persistência em banco ou arquivo vetorial."
+    )
+
+    st.markdown("## 5. Limitações atuais")
+    st.markdown(
+        """
+- somente documentos `.md` e `.txt`;
+- chunking por caracteres, não semântico;
+- índice reconstruído a cada reinício;
+- busca exaustiva sobre todos os chunks;
+- nenhum threshold mínimo de similaridade;
+- nenhum BM25 ou busca híbrida;
+- nenhum reranker;
+- nenhum filtro por metadados;
+- adequado para demonstração e bases pequenas, não para produção em larga escala.
+"""
+    )
+
+    st.markdown("## 6. Evolução recomendada")
+    st.markdown(
+        """
+```mermaid
+flowchart LR
+    A[MVP atual: NumPy em memória] --> B[Persistência vetorial]
+    B --> C[Elastic ou Azure AI Search]
+    C --> D[Busca híbrida BM25 + vetorial]
+    D --> E[Reranking]
+    E --> F[Threshold e filtros de metadados]
+    F --> G[Observabilidade e avaliação]
 ```
 """
     )
