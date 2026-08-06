@@ -146,6 +146,31 @@ streamlit run app.py
 3. O cliente sintético e o operador sintético conversarão por até oito turnos.
 4. Ao final, um juiz avaliará fundamentação, aderência ao procedimento, resolução e riscos.
 
+### Fluxo da conversa sintética
+
+```mermaid
+sequenceDiagram
+    participant C as Cliente sintético
+    participant R as RAG
+    participant O as Operador sintético
+    participant J as Avaliador
+
+    C->>R: Envia a primeira mensagem
+    R->>R: Busca documentos relevantes
+    R->>O: Entrega contexto e sugestão
+    O->>C: Responde usando a assistência
+    C->>C: Analisa a conversa e o cenário
+    C->>R: Gera nova resposta como cliente
+    R->>O: Faz nova busca no RAG
+    O->>C: Responde novamente
+    C->>R: Continua a conversa
+    R->>O: Gera nova assistência
+    O->>C: Resposta final
+    C->>J: Conversa completa
+    O->>J: Respostas e fontes
+    J->>J: Avalia qualidade, riscos e alucinações
+```
+
 ## Componentes futuros
 
 ### Etapa 2 — Ingestão multimodal
