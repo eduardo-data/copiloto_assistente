@@ -1,269 +1,256 @@
 # Copiloto Assistente
 
-MVP de um copiloto interativo para atendimento. O usuário pode atuar como cliente e como atendente, enquanto o sistema recupera informações da base documental e gera sugestões fundamentadas em tempo real.
+MVP de um copiloto interativo para atendimento. O usuário pode atuar como cliente e como atendente, enquanto o sistema consulta uma base documental e gera sugestões fundamentadas em tempo real.
 
 ## O que esta versão permite
 
-- adicionar documentos `.md` e `.txt` à base;
-- dividir os documentos em chunks com overlap;
-- gerar embeddings multilíngues locais;
-- recuperar os chunks mais relevantes por similaridade vetorial;
-- manter o histórico completo da conversa;
-- mostrar sugestões de atendimento com fontes e scores;
-- responder manualmente ou usar a resposta sugerida pela IA;
-- enviar toda a conversa e o contexto recuperado ao GPT-4o mini;
-- exportar as evidências da simulação para apresentação e auditoria.
+- adicionar documentos `.md` e `.txt`;
+- criar chunks estruturados por títulos e seções;
+- preservar tabelas Markdown inteiras como chunks únicos;
+- gerar embeddings multilíngues localmente;
+- escolher entre **Naive RAG** e **GraphRAG estrutural local**;
+- refazer a recuperação a cada nova pergunta do cliente;
+- enviar ao GPT a pergunta atual, todas as perguntas do cliente, o histórico completo e o contexto recuperado;
+- responder manualmente ou utilizar a resposta sugerida pela IA;
+- exportar a conversa, os eventos e as evidências da recuperação em JSON.
 
-## Resumo técnico do RAG atual
+## Resumo técnico
 
 | Componente | Implementação atual |
 |---|---|
-| Formatos de entrada | `.md` e `.txt` em `data/docs/` |
-| Tipo de chunking | Chunking por caracteres, com cortes preferenciais em parágrafo, linha, final de frase e ponto e vírgula |
-| Tamanho padrão | `900` caracteres por chunk |
-| Overlap padrão | `180` caracteres entre chunks consecutivos |
-| Identificação | `arquivo::índice`, por exemplo `catalogo.md::3` |
-| Metadados mantidos | fonte, `chunk_id`, texto, posição inicial e posição final |
-| Modelo de embedding | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` |
-| Execução do embedding | Local, usando `sentence-transformers` |
-| Normalização | Embeddings normalizados antes da busca |
-| Banco vetorial | Não existe banco persistente neste MVP |
-| Armazenamento atual | Matriz NumPy em memória durante a execução do Streamlit |
-| Busca | Similaridade de cosseno calculada por produto escalar entre vetores normalizados |
-| Recuperação | Top-k global, padrão `5` chunks |
-| Threshold | Não aplicado nesta versão |
-| Reranking | Não aplicado nesta versão |
-| Consulta do retriever | Conteúdo dos últimos 6 turnos da conversa |
-| LLM gerador | Azure OpenAI, deployment `gpt-4o-mini-2` |
-| Contexto enviado ao LLM | Histórico completo + chunks recuperados + fonte + ID + score |
+| Formatos | `.md` e `.txt` em `data/docs/` |
+| Chunking | Estruturado por cabeçalhos, seções, parágrafos, tabelas e blocos de código |
+| Texto comum | Agrupado por seção até `CHUNK_SIZE` |
+| Texto longo | Dividido preferencialmente em parágrafo, linha, frase ou ponto e vírgula |
+| Tabelas Markdown | Uma tabela inteira corresponde a um chunk atômico |
+| Blocos de código | Preservados como chunks atômicos |
+| Tamanho padrão | `900` caracteres para chunks textuais |
+| Overlap padrão | `180` caracteres, aplicado a textos longos divididos |
+| Embedding | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` |
+| Execução | Local, com `sentence-transformers` |
+| Armazenamento vetorial | Matriz NumPy `float32` em memória |
+| Similaridade | Produto escalar entre embeddings normalizados, equivalente ao cosseno |
+| Recuperação | Top-k padrão de `5` |
+| Modos | Naive RAG ou GraphRAG estrutural local |
+| Banco vetorial persistente | Ainda não existe |
+| Banco de grafos persistente | Ainda não existe |
+| LLM | Azure OpenAI, deployment `gpt-4o-mini-2` |
+| Prompt do LLM | Pergunta atual + perguntas do cliente + histórico + contexto recuperado |
 
-> **Importante:** a expressão “índice vetorial local” neste projeto significa uma matriz de embeddings mantida em memória. Ainda não é um banco vetorial como Elastic, Azure AI Search, Qdrant, Milvus, Weaviate ou PostgreSQL com pgvector.
+> Neste MVP, “índice vetorial” significa uma matriz NumPy em memória. O GraphRAG também utiliza estruturas em memória; ele não depende de Neo4j, Cosmos DB, Elastic ou outro banco de grafos.
 
-## Como o chunking funciona
+## Chunking estruturado
 
-O projeto usa um splitter próprio orientado a caracteres. Ele não é chunking semântico nem hierárquico nesta versão.
+O indexador não corta o documento apenas a cada quantidade fixa de caracteres. Primeiro identifica blocos estruturais.
 
-Para cada documento:
+### Títulos e seções
 
-1. o texto é normalizado, preservando as quebras de linha;
-2. o sistema tenta criar uma janela de até `CHUNK_SIZE` caracteres;
-3. antes de cortar exatamente no limite, procura um ponto de separação natural na segunda metade da janela;
-4. a prioridade de corte é:
-   - parágrafo: `\n\n`;
-   - quebra de linha: `\n`;
-   - final de frase: `. `;
-   - ponto e vírgula: `; `;
-5. quando não encontra um separador adequado, corta no limite definido;
-6. o próximo chunk começa `CHUNK_OVERLAP` caracteres antes do final do chunk anterior.
+Cabeçalhos Markdown como `#`, `##` e `###` definem a seção à qual o chunk pertence. O nome da seção é armazenado como metadado e também entra no texto usado para gerar o embedding.
 
-Exemplo com a configuração padrão:
+### Texto comum
 
-```text
-Chunk 0: caracteres 0 até aproximadamente 900
-Chunk 1: começa aproximadamente no caractere 720
-Chunk 2: começa aproximadamente 180 caracteres antes do fim do Chunk 1
+Parágrafos da mesma seção são agrupados até o limite configurado. Quando o texto fica maior que `CHUNK_SIZE`, a divisão procura, nesta ordem aproximada:
+
+1. separação entre parágrafos;
+2. quebra de linha;
+3. final de frase;
+4. ponto e vírgula;
+5. limite máximo de caracteres.
+
+O overlap é aplicado apenas quando um bloco textual longo precisa ser dividido.
+
+### Tabelas de preços
+
+Uma tabela Markdown completa é tratada como um chunk atômico, mesmo que ultrapasse `CHUNK_SIZE`.
+
+Exemplo reconhecido:
+
+```markdown
+| Produto | Preço | Condição |
+|---|---:|---|
+| Mesa Aurora | R$ 1.299,00 | À vista |
+| Mesa Luna | R$ 1.499,00 | 10 parcelas |
 ```
 
-O overlap reduz o risco de uma informação importante ficar dividida exatamente na fronteira de dois chunks.
+Isso mantém no mesmo chunk:
 
-## Como os embeddings funcionam
+- cabeçalhos;
+- nomes dos produtos;
+- preços;
+- condições;
+- relações entre colunas e linhas.
 
-O modelo padrão é:
+Para documentos com muitos preços, preservar a tabela corretamente é mais importante do que simplesmente trocar Naive RAG por GraphRAG.
+
+## Embeddings
+
+Modelo padrão:
 
 ```text
 sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 ```
 
-Ele é carregado localmente pelo pacote `sentence-transformers`. Cada chunk é transformado em um vetor numérico. Os vetores são normalizados e convertidos para `float32`.
-
-Na inicialização ou reindexação:
+Para cada chunk, o sistema gera o embedding usando:
 
 ```text
-Textos dos chunks
-    ↓
-SentenceTransformer.encode()
-    ↓
-Embeddings normalizados
-    ↓
-Matriz NumPy em memória
+Documento: nome-do-arquivo
+Seção: nome-da-seção
+Tipo: text, table ou code
+Conteúdo do chunk
 ```
 
-Na consulta:
+Os vetores são normalizados e armazenados em uma matriz NumPy em memória. A consulta do cliente passa pelo mesmo modelo.
+
+## Opção 1 — Naive RAG
+
+O Naive RAG realiza busca vetorial direta.
+
+```mermaid
+flowchart LR
+    Q[Pergunta atual e continuidade] --> E[Embedding da consulta]
+    E --> M[Matriz NumPy]
+    M --> S[Similaridade de cosseno]
+    S --> K[Top-k chunks]
+    K --> C[Contexto do GPT-4o mini]
+```
+
+### Quando começar por ele
+
+- perguntas diretas de preço;
+- documentos pequenos e bem estruturados;
+- tabela com produto e valor no mesmo chunk;
+- necessidade de comportamento mais simples e previsível.
+
+## Opção 2 — GraphRAG estrutural local
+
+O GraphRAG disponível neste MVP não é o pipeline completo do Microsoft GraphRAG. Ele é uma implementação local para demonstrar expansão por relacionamentos documentais.
+
+### Construção do grafo
+
+Cada chunk é um nó. O sistema cria arestas quando os chunks possuem alguma destas relações:
+
+- sequência no mesmo documento;
+- mesma seção;
+- entidades compartilhadas;
+- códigos compartilhados;
+- valores ou nomes de produtos compartilhados.
+
+```mermaid
+flowchart LR
+    D[Documento] --> S[Seção]
+    S --> C[Chunks]
+    C --> N[Anterior e seguinte]
+    C --> R[Mesma seção]
+    C --> E[Entidades compartilhadas]
+```
+
+### Recuperação GraphRAG
+
+1. a busca vetorial encontra chunks sementes;
+2. o grafo recupera chunks vizinhos relacionados;
+3. sementes e vizinhos recebem scores combinados;
+4. os melhores resultados formam o contexto.
+
+```mermaid
+flowchart LR
+    Q[Pergunta] --> V[Sementes vetoriais]
+    V --> G[Expansão no grafo]
+    G --> K[Top-k combinado]
+    K --> C[Contexto expandido]
+```
+
+### Quando experimentar GraphRAG
+
+- preço, condição e descrição estão separados;
+- a pergunta depende de relações entre produtos, planos ou categorias;
+- informações estão distribuídas em várias seções;
+- a pergunta usa referência indireta, como “essa mesa”, “esse plano” ou “e a entrega?”.
+
+GraphRAG pode ampliar o contexto, mas também pode trazer informação vizinha desnecessária. Por isso, a interface permite comparar os dois modos.
+
+## Atualização a cada nova pergunta
+
+Cada nova mensagem enviada como cliente executa este ciclo:
+
+1. remove da interface os chunks, sugestões e respostas consolidadas anteriores;
+2. registra a nova pergunta no histórico;
+3. marca a nova mensagem como pergunta principal;
+4. monta uma nova consulta de recuperação;
+5. executa novamente o Naive RAG ou GraphRAG;
+6. monta um novo contexto;
+7. chama o GPT-4o mini novamente.
+
+O cache do Streamlit é utilizado somente para manter o modelo de embeddings e o índice documental carregados. Os resultados de consultas não são armazenados no cache.
+
+Também existe o botão **Reprocessar pergunta atual**, que permite comparar a mesma pergunta nos dois modos.
+
+## Consulta usada pelo retriever
+
+A consulta destaca explicitamente a pergunta mais recente:
 
 ```text
-Últimos 6 turnos da conversa
-    ↓
-Embedding da consulta
-    ↓
-Comparação com todos os embeddings dos chunks
-    ↓
-Ordenação por score
-    ↓
-Top-k chunks
+PERGUNTA ATUAL DO CLIENTE:
+Qual o preço dessa mesa?
+
+PERGUNTAS ANTERIORES DO CLIENTE:
+- Vocês têm mesa para seis lugares?
+
+ÚLTIMA RESPOSTA DO ATENDENTE:
+Temos alguns modelos disponíveis.
 ```
 
-Como os vetores são normalizados, o produto escalar usado no código equivale à similaridade de cosseno.
+Assim, a recuperação não depende apenas de uma concatenação indiferenciada dos últimos turnos.
 
-## Onde os embeddings ficam armazenados
+## Contexto enviado ao GPT
 
-Neste MVP, os embeddings ficam somente em memória:
+O GPT recebe quatro campos separados:
 
-```python
-self.embeddings: numpy.ndarray
+```text
+PERGUNTA ATUAL DO CLIENTE
+
+TODAS AS PERGUNTAS DO CLIENTE
+
+HISTÓRICO COMPLETO DA CONVERSA
+
+CONTEXTO RECUPERADO PELO RAG
 ```
 
-Consequências:
+Cada chunk do contexto contém:
 
-- o índice é reconstruído quando o aplicativo reinicia;
-- não existe persistência dos vetores em disco;
-- não existe coleção, índice ou tabela em um banco externo;
-- a busca compara a consulta com todos os chunks;
-- funciona bem para demonstrações e bases pequenas;
-- não é a arquitetura final indicada para milhares ou milhões de chunks.
+- fonte;
+- seção;
+- tipo do chunk;
+- ID;
+- score;
+- origem da recuperação;
+- relações do grafo, quando aplicável;
+- conteúdo completo.
 
-A evolução prevista é substituir a matriz em memória por uma camada persistente, como Elastic com busca híbrida, Azure AI Search ou outro banco vetorial.
-
-## Fluxo do atendimento interativo
+## Fluxo do atendimento
 
 ```mermaid
 sequenceDiagram
     participant C as Cliente
-    participant H as Histórico
-    participant Q as Consulta semântica
-    participant E as Modelo de embeddings
-    participant M as Matriz NumPy em memória
+    participant Q as Montagem da consulta
+    participant R as Naive RAG ou GraphRAG
+    participant P as Montagem do prompt
     participant G as GPT-4o mini
-    participant O as Operador
+    participant O as Atendente
 
-    C->>H: Digita uma mensagem
-    H->>Q: Seleciona os últimos 6 turnos
-    Q->>E: Solicita embedding da consulta
-    E->>M: Compara com embeddings normalizados dos chunks
-    M->>M: Calcula scores e ordena resultados
-    M->>G: Entrega top-k chunks, fontes, IDs e scores
-    H->>G: Entrega o histórico completo
-    G->>O: Gera sugestão fundamentada
-    O->>C: Digita resposta manual
-    O->>C: Ou usa a resposta da IA
-    O->>G: Opcionalmente envia todo o histórico
-    G->>O: Gera resposta consolidada
+    C->>Q: Envia nova pergunta
+    Q->>Q: Destaca pergunta atual
+    Q->>R: Executa nova recuperação
+    R->>P: Chunks, fontes, tipos e scores
+    C->>P: Perguntas do cliente
+    C->>P: Histórico completo
+    P->>G: Prompt completo
+    G->>O: Sugestão para a pergunta atual
+    O->>C: Resposta manual ou resposta da IA
 ```
 
-## Arquitetura do MVP
+## Configuração
 
-```mermaid
-flowchart TD
-    subgraph INGESTAO[Ingestão e indexação]
-        A[Documentos MD e TXT] --> B[Leitura e normalização]
-        B --> C[Chunking por caracteres]
-        C --> D[Chunks de até 900 caracteres]
-        D --> E[Overlap de 180 caracteres]
-        E --> F[Embedding multilíngue local]
-        F --> G[Normalização dos vetores]
-        G --> H[Matriz NumPy em memória]
-    end
-
-    subgraph RECUPERACAO[Recuperação]
-        I[Últimos 6 turnos] --> J[Consulta de recuperação]
-        J --> K[Embedding da consulta]
-        K --> L[Produto escalar]
-        H --> L
-        L --> M[Ordenação por similaridade]
-        M --> N[Top-k padrão 5]
-    end
-
-    subgraph GERACAO[Geração assistida]
-        N --> O[Context Assembly]
-        P[Histórico completo] --> O
-        O --> Q[Azure OpenAI GPT-4o mini]
-        Q --> R[Resposta sugerida]
-        Q --> S[Próxima ação]
-        Q --> T[Alertas]
-        Q --> U[Fontes utilizadas]
-    end
-
-    subgraph OPERACAO[Interação humana]
-        R --> V[Operador]
-        V --> W[Resposta manual]
-        V --> X[Usar resposta da IA]
-        W --> P
-        X --> P
-    end
-```
-
-## Etapas detalhadas de uma execução
-
-### 1. Entrada da mensagem
-
-A nova mensagem do cliente é adicionada à lista `st.session_state.conversation`.
-
-### 2. Construção da consulta
-
-O sistema pega no máximo os 6 últimos itens da conversa e concatena o conteúdo. Essa consulta tenta preservar o assunto recente sem usar todo o histórico na recuperação.
-
-### 3. Vetorização da consulta
-
-O mesmo modelo usado nos documentos gera o embedding da consulta. O vetor também é normalizado.
-
-### 4. Busca vetorial
-
-A matriz NumPy contém um vetor para cada chunk. O sistema calcula:
-
-```text
-scores = embeddings_dos_chunks @ embedding_da_consulta
-```
-
-Como todos os vetores estão normalizados, esse score representa similaridade de cosseno.
-
-### 5. Seleção top-k
-
-Os scores são ordenados do maior para o menor. Por padrão, os 5 chunks de maior pontuação são selecionados. Nesta versão, resultados de score baixo ainda podem entrar porque não existe threshold mínimo.
-
-### 6. Montagem do contexto
-
-Para cada chunk recuperado, o sistema inclui:
-
-```text
-FONTE
-CHUNK_ID
-SCORE
-CONTEÚDO
-```
-
-### 7. Geração da sugestão
-
-O GPT-4o mini recebe:
-
-- histórico completo da conversa;
-- contexto recuperado pelo RAG;
-- instrução para não inventar preços, políticas, prazos ou procedimentos;
-- obrigação de informar quando não houver evidência suficiente.
-
-### 8. Decisão do operador
-
-O operador pode:
-
-- escrever sua própria resposta;
-- usar a resposta sugerida pela IA;
-- enviar a conversa completa novamente para gerar uma resposta consolidada.
-
-## Interface da demonstração
-
-A tela principal é organizada em três áreas:
-
-1. **Cliente:** mensagem enviada pelo cliente e histórico desse papel.
-2. **RAG e sugestão:** chunks, scores, fontes e sugestão atualizada.
-3. **Atendente:** resposta manual ou resposta reutilizada da IA.
-
-Outras abas:
-
-- **Base documental:** upload, visualização dos chunks e reindexação;
-- **Detalhes da execução:** consulta, contexto enviado e eventos registrados;
-- **Arquitetura:** explicação executiva e técnica de cada componente.
-
-## Configuração do `.env`
-
-Crie um arquivo `.env` na raiz:
+Crie o arquivo `.env`:
 
 ```env
 AZURE_STRUCTURING_ENDPOINT=
@@ -280,30 +267,11 @@ TOP_K=5
 MAX_TURNS=12
 ```
 
-### Significado das variáveis
+O endpoint deve ser apenas o endereço-base do recurso Azure OpenAI.
 
-| Variável | Função |
-|---|---|
-| `AZURE_STRUCTURING_ENDPOINT` | Endpoint-base do recurso Azure OpenAI |
-| `AZURE_STRUCTURING_KEY` | Chave de acesso ao Azure OpenAI |
-| `AZURE_STRUCTURING_DEPLOYMENT` | Nome do deployment do modelo gerador |
-| `AZURE_STRUCTURING_VERSION_COMPLETIONS` | Versão da API de Chat Completions |
-| `REQUEST_TIMEOUT_SECONDS` | Tempo máximo da chamada ao modelo |
-| `EMBEDDING_MODEL` | Modelo local usado para vetorizar documentos e consultas |
-| `CHUNK_SIZE` | Limite aproximado de caracteres por chunk |
-| `CHUNK_OVERLAP` | Quantidade de caracteres repetidos entre chunks |
-| `TOP_K` | Quantidade de chunks devolvidos pela busca |
-| `MAX_TURNS` | Parâmetro reservado para controle de conversas mais longas |
+Nunca envie o `.env` ao GitHub.
 
-O endpoint deve ser apenas o endereço-base do recurso Azure OpenAI, por exemplo:
-
-```text
-https://nome-do-recurso.openai.azure.com/
-```
-
-Nunca envie o arquivo `.env` ao GitHub.
-
-## Instalação com `uv` no Windows
+## Instalação com `uv`
 
 ```powershell
 git clone https://github.com/eduardo-data/copiloto_assistente.git
@@ -314,15 +282,10 @@ uv venv .venv --python 3.11
 uv pip install -r requirements.txt
 
 Copy-Item .env.example .env
-```
-
-Depois de preencher o `.env`, execute:
-
-```powershell
 uv run streamlit run app.py
 ```
 
-## Atualização de uma cópia existente
+Para atualizar uma cópia existente:
 
 ```powershell
 git checkout main
@@ -331,65 +294,43 @@ uv pip install -r requirements.txt
 uv run streamlit run app.py
 ```
 
-## Base documental
-
-Os documentos podem ser adicionados pela interface ou colocados em:
-
-```text
-data/docs/
-```
-
-Ao reindexar, o sistema executa:
-
-```text
-Documento
-  → normalização básica
-  → chunking por caracteres
-  → overlap
-  → embedding multilíngue local
-  → normalização dos vetores
-  → matriz NumPy em memória
-  → recuperação top-k
-```
-
 ## Evidências para apresentação
 
-A simulação registra:
+A interface mostra e exporta:
 
-- mensagens do cliente e do atendente;
-- origem da resposta do atendente: manual ou IA;
-- consulta usada no retriever;
+- estratégia selecionada;
+- pergunta atual;
+- todas as perguntas do cliente;
+- consulta do retriever;
 - chunks recuperados;
-- scores de similaridade;
-- fontes utilizadas;
-- contexto enviado ao modelo;
-- resposta sugerida e resposta consolidada.
+- tipo do chunk;
+- scores;
+- origem vetorial ou expansão do grafo;
+- relações utilizadas;
+- contexto documental;
+- prompt completo enviado ao GPT;
+- resposta manual ou gerada pela IA.
 
-Esses dados podem ser exportados em JSON para demonstração, análise e auditoria.
+## Limitações do MVP
 
-## Limitações técnicas do MVP
-
-- aceita inicialmente apenas `.md` e `.txt`;
-- o chunking é baseado em caracteres, não em tokens ou semântica;
-- o índice vetorial fica em memória e não é persistente;
-- a busca é exaustiva sobre todos os chunks;
+- entrada restrita a `.md` e `.txt`;
+- tabelas precisam estar corretamente representadas em Markdown;
+- vetores e grafo existem somente em memória;
+- extração de entidades do grafo é baseada em regras locais;
+- não existe reranker;
 - não existe threshold mínimo de similaridade;
-- não existe busca lexical BM25;
-- não existe busca híbrida;
-- não existe reranking;
-- não existem filtros por metadados;
-- não possui autenticação;
+- não existe autenticação;
 - não deve ser usado diretamente em produção.
 
-## Evoluções planejadas
+## Evoluções recomendadas
 
-- ingestão de PDF, DOCX, PPT e imagens;
-- OCR e compreensão de layout;
-- chunking hierárquico ou semântico;
-- persistência em Elastic ou Azure AI Search;
+- extração de PDF, PPT, DOCX e imagens;
+- Docling ou Azure Document Intelligence para estrutura e tabelas;
+- validação específica de tabelas de preço;
+- Elastic, Azure AI Search ou pgvector para persistência vetorial;
+- Neo4j, Cosmos DB Gremlin ou outro banco de grafos quando o grafo crescer;
+- extração de entidades e relações com modelo especializado ou LLM;
 - busca híbrida BM25 + vetorial;
-- threshold configurável;
 - reranking;
-- filtros por produto, canal, vigência e público;
-- observabilidade com Langfuse e Elastic;
-- integração com a plataforma real de atendimento.
+- filtros por produto, vigência, canal e público;
+- observabilidade com Langfuse e Elastic.
